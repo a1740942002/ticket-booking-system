@@ -46,3 +46,21 @@ test("庫存不足時下單失敗", async () => {
   });
   expect(res.status).toBe(409);
 });
+
+test("付款後訂單變為 paid", async () => {
+  const createRes = await app.request("/orders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: String(userId) },
+    body: JSON.stringify({ zoneId, quantity: 1 }),
+  });
+  const order = await createRes.json();
+
+  const payRes = await app.request(`/orders/${order.id}/pay`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: String(userId) },
+    body: JSON.stringify({ outcome: "success" }),
+  });
+  expect(payRes.status).toBe(200);
+  const paid = await payRes.json();
+  expect(paid.status).toBe("paid");
+});
