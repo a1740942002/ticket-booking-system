@@ -4,6 +4,7 @@ import { db } from "../db";
 import { ticketZones, orders } from "../db/schema";
 import { eq, and, gte, sql } from "drizzle-orm";
 import { RESERVATION_MS, expireOrderIfPending } from "../orders/expiry";
+import { preDeduct, returnStockToRedis, syncZoneStockToRedis } from "../orders/redis-stock";
 
 export const ordersRoute = new Hono();
 
@@ -113,6 +114,48 @@ ordersRoute.post("/optimistic", async (c) => {
     // version 對不上 → 有人搶先,重讀重試
   }
   return c.json({ error: "too much contention, please retry" }, 409);
+});
+
+// Phase 5:Redis 預扣庫存當「入場閘門」。
+// 大量請求先在 Redis 用 Lua 原子預扣;搶不到的在這裡就被擋掉,完全不打 Postgres。
+// 過閘的贏家才進 DB 做原子扣減 + 建立保留訂單;DB 漂移或失敗則把 Redis 加回去。
+ordersRoute.post("/redis", async (c) => {
+  const userId = Number(c.req.header("Authorization"));
+  if (!userId) return c.json({ error: "unauthorized" }, 401);
+  const body = CreateOrderRequest.parse(await c.req.json());
+
+  // 1) Redis 原子預扣(閘門)
+  let r = await preDeduct(body.zoneId, body.quantity);
+  if (r === -1) {
+    // 未初始化 → 從 DB 暖機後重試一次
+    await syncZoneStockToRedis(body.zoneId);
+    r = await preDeduct(body.zoneId, body.quantity);
+  }
+  if (r === -1) return c.json({ error: "zone not found" }, 404);
+  if (r === -2) return c.json({ error: "insufficient stock" }, 409); // 大量請求在此被擋,沒打 DB
+
+  // 2) 過閘的贏家才進 DB(原子扣減 + 建立保留訂單)
+  try {
+    const [zone] = await db
+      .update(ticketZones)
+      .set({ availableQuantity: sql`${ticketZones.availableQuantity} - ${body.quantity}` })
+      .where(
+        and(
+          eq(ticketZones.id, body.zoneId),
+          gte(ticketZones.availableQuantity, body.quantity),
+        ),
+      )
+      .returning();
+    if (!zone) {
+      // DB 與 Redis 漂移(理論上不該發生)→ 回補 Redis
+      await returnStockToRedis(body.zoneId, body.quantity);
+      return c.json({ error: "insufficient stock" }, 409);
+    }
+    return c.json(await insertOrder(db, userId, zone, body.quantity));
+  } catch (e) {
+    await returnStockToRedis(body.zoneId, body.quantity); // DB 失敗 → 回補 Redis
+    throw e;
+  }
 });
 
 ordersRoute.get("/:id", async (c) => {

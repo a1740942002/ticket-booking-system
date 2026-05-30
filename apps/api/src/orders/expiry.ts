@@ -1,6 +1,7 @@
 import { db } from "../db";
 import { orders, ticketZones } from "../db/schema";
 import { and, eq, lt, sql } from "drizzle-orm";
+import { returnStockToRedis } from "./redis-stock";
 
 // 保留時間:下單後多久內必須付款,逾時釋放。預設 5 分鐘,可用環境變數縮短以利測試。
 export const RESERVATION_MS = Number(process.env.RESERVATION_MS ?? 5 * 60 * 1000);
@@ -23,6 +24,9 @@ export async function expireOrderIfPending(order: Pick<Order, "id" | "zoneId" | 
     .update(ticketZones)
     .set({ availableQuantity: sql`${ticketZones.availableQuantity} + ${order.quantity}` })
     .where(eq(ticketZones.id, order.zoneId));
+
+  // 同步把票還回 Redis 閘門(best-effort;DB 已是真相)
+  await returnStockToRedis(order.zoneId, order.quantity);
 
   return true;
 }
