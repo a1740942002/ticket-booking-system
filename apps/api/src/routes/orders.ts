@@ -1,27 +1,13 @@
 import { Hono } from "hono";
 import { CreateOrderRequest } from "@tickets/shared";
 import { db } from "../db";
-import { ticketZones, orders } from "../db/schema";
+import { ticketZones, orders, seats } from "../db/schema";
 import { eq, and, gte, sql } from "drizzle-orm";
-import { RESERVATION_MS, expireOrderIfPending } from "../orders/expiry";
+import { expireOrderIfPending } from "../orders/expiry";
+import { insertOrder } from "../orders/create";
 import { preDeduct, returnStockToRedis, syncZoneStockToRedis } from "../orders/redis-stock";
 
 export const ordersRoute = new Hono();
-
-// 共用:把訂單寫進 orders 表。exec 可以是 db 或交易 tx。
-// 下單即「保留」庫存,並設 expires_at:逾時未付款會被釋放（Phase 4）。
-type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
-type Zone = typeof ticketZones.$inferSelect;
-
-async function insertOrder(exec: Executor, userId: number, zone: Zone, quantity: number) {
-  const totalPrice = String(Number(zone.price) * quantity);
-  const expiresAt = new Date(Date.now() + RESERVATION_MS);
-  const [order] = await exec
-    .insert(orders)
-    .values({ userId, zoneId: zone.id, quantity, totalPrice, status: "pending_payment", expiresAt })
-    .returning();
-  return order;
-}
 
 // ① 原子條件更新（預設解法）
 // 「檢查庫存 + 扣減」壓進單一 UPDATE,由資料庫保證原子性。
@@ -189,5 +175,11 @@ ordersRoute.post("/:id/pay", async (c) => {
     .set({ status: newStatus })
     .where(eq(orders.id, id))
     .returning();
+
+  // 指定座位訂單付款成功 → 座位標為 sold（Phase 6）
+  if (newStatus === "paid" && updated.seatId) {
+    await db.update(seats).set({ status: "sold" }).where(eq(seats.id, updated.seatId));
+  }
+
   return c.json(updated);
 });

@@ -1,7 +1,7 @@
 import { expect, test, beforeAll } from "bun:test";
 import { app } from "../src/app";
 import { db } from "../src/db";
-import { events, ticketZones, orders, users } from "../src/db/schema";
+import { events, ticketZones, orders, users, seats } from "../src/db/schema";
 import { eq } from "drizzle-orm";
 
 // Phase 3:三種防超賣解法,在「100 人同時搶 10 張票」下都不應超賣。
@@ -15,6 +15,7 @@ let buyerIds: number[];
 
 beforeAll(async () => {
   await db.delete(orders);
+  await db.delete(seats);
   await db.delete(ticketZones);
   await db.delete(events);
   await db.delete(users);

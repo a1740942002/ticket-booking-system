@@ -27,10 +27,19 @@ export const ticketZones = pgTable("ticket_zones", {
   version: integer("version").notNull().default(0), // 樂觀鎖用（Phase 3）
 });
 
+// 指定座位（Phase 6）。每個座位是一列,鎖的粒度 = 單一座位。
+export const seats = pgTable("seats", {
+  id: serial("id").primaryKey(),
+  zoneId: integer("zone_id").notNull().references(() => ticketZones.id),
+  label: text("label").notNull(), // 例 "A-3-12"
+  status: text("status").notNull().default("available"), // available | held | sold
+});
+
 export const orders = pgTable("orders", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull().references(() => users.id),
   zoneId: integer("zone_id").notNull().references(() => ticketZones.id),
+  seatId: integer("seat_id").references(() => seats.id), // 指定座位訂單才有（Phase 6）
   quantity: integer("quantity").notNull(),
   totalPrice: numeric("total_price", { precision: 10, scale: 2 }).notNull(),
   status: text("status").notNull().default("pending_payment"),

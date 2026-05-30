@@ -15,6 +15,13 @@
       "when": 1780112784478,
       "tag": "0001_shallow_scream",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1780116500943,
+      "tag": "0002_magical_tana_nile",
+      "breakpoints": true
     }
   ]
 }

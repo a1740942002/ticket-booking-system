@@ -1,7 +1,7 @@
 import { expect, test, beforeAll, afterAll } from "bun:test";
 import { app } from "../src/app";
 import { db } from "../src/db";
-import { events, ticketZones, orders, users } from "../src/db/schema";
+import { events, ticketZones, orders, users, seats } from "../src/db/schema";
 import { eq } from "drizzle-orm";
 import { syncZoneStockToRedis, stockKey } from "../src/orders/redis-stock";
 import { redis } from "../src/redis";
@@ -16,6 +16,7 @@ let buyerIds: number[];
 
 beforeAll(async () => {
   await db.delete(orders);
+  await db.delete(seats);
   await db.delete(ticketZones);
   await db.delete(events);
   await db.delete(users);
