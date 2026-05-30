@@ -3,18 +3,21 @@ import { CreateOrderRequest } from "@tickets/shared";
 import { db } from "../db";
 import { ticketZones, orders } from "../db/schema";
 import { eq, and, gte, sql } from "drizzle-orm";
+import { RESERVATION_MS, expireOrderIfPending } from "../orders/expiry";
 
 export const ordersRoute = new Hono();
 
 // 共用:把訂單寫進 orders 表。exec 可以是 db 或交易 tx。
+// 下單即「保留」庫存,並設 expires_at:逾時未付款會被釋放（Phase 4）。
 type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 type Zone = typeof ticketZones.$inferSelect;
 
 async function insertOrder(exec: Executor, userId: number, zone: Zone, quantity: number) {
   const totalPrice = String(Number(zone.price) * quantity);
+  const expiresAt = new Date(Date.now() + RESERVATION_MS);
   const [order] = await exec
     .insert(orders)
-    .values({ userId, zoneId: zone.id, quantity, totalPrice, status: "pending_payment" })
+    .values({ userId, zoneId: zone.id, quantity, totalPrice, status: "pending_payment", expiresAt })
     .returning();
   return order;
 }
@@ -130,7 +133,13 @@ ordersRoute.post("/:id/pay", async (c) => {
     return c.json({ error: "order not payable" }, 409);
   }
 
-  // mock 付款:success → paid,其餘維持 pending（Phase 4 再做逾時釋放）
+  // 把關:保留已逾時 → 釋放庫存並拒絕付款（不依賴背景掃描的時機）
+  if (order.expiresAt && order.expiresAt.getTime() < Date.now()) {
+    await expireOrderIfPending(order);
+    return c.json({ error: "reservation expired" }, 409);
+  }
+
+  // mock 付款:success → paid,其餘維持 pending
   const newStatus = outcome === "success" ? "paid" : "pending_payment";
   const [updated] = await db
     .update(orders)
