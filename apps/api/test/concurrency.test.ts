@@ -4,8 +4,8 @@ import { db } from "../src/db";
 import { events, ticketZones, orders, users } from "../src/db/schema";
 import { eq } from "drizzle-orm";
 
-// Phase 2:用併發證明 Phase 1 的天真扣庫存會超賣。
-// 100 個人同時搶只有 10 張的票區 —— 正確的系統最多賣出 10 張。
+// Phase 3:三種防超賣解法,在「100 人同時搶 10 張票」下都不應超賣。
+// 正確的不變量:售出訂單數 <= 總票數,且 availableQuantity == 總票數 - 售出數 >= 0。
 
 const BUYERS = 100;
 const STOCK = 10;
@@ -37,11 +37,14 @@ beforeAll(async () => {
   zoneId = zone.id;
 });
 
-test("100 人同時搶 10 張票:售出數量不應超過庫存", async () => {
-  // 同一瞬間發出 100 個下單請求
+// 把票區重設成滿庫存,然後讓 BUYERS 個人同時打 path,回傳統計。
+async function hammer(path: string) {
+  await db.delete(orders);
+  await db.update(ticketZones).set({ availableQuantity: STOCK, version: 0 }).where(eq(ticketZones.id, zoneId));
+
   const responses = await Promise.all(
     buyerIds.map((uid) =>
-      app.request("/orders", {
+      app.request(path, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: String(uid) },
         body: JSON.stringify({ zoneId, quantity: 1 }),
@@ -50,22 +53,37 @@ test("100 人同時搶 10 張票:售出數量不應超過庫存", async () => {
   );
 
   const succeeded = responses.filter((r) => r.status === 200).length;
-  const rejected = responses.filter((r) => r.status === 409).length;
-
-  // 從 DB 看真實結果
   const [zone] = await db.select().from(ticketZones).where(eq(ticketZones.id, zoneId));
-  const placedOrders = await db.select().from(orders).where(eq(orders.zoneId, zoneId));
+  const placed = await db.select().from(orders).where(eq(orders.zoneId, zoneId));
+  return { succeeded, available: zone.availableQuantity, sold: placed.length };
+}
 
-  console.log("\n========== 併發結果 ==========");
-  console.log(`下單成功 (200):       ${succeeded}`);
-  console.log(`被擋下 (409 缺貨):    ${rejected}`);
-  console.log(`實際建立的訂單數:     ${placedOrders.length}`);
-  console.log(`剩餘庫存 availableQty: ${zone.availableQuantity}  (應該 >= 0)`);
-  console.log(`總票數 totalQuantity:  ${zone.totalQuantity}`);
-  console.log(`超賣張數:             ${Math.max(0, placedOrders.length - zone.totalQuantity)}`);
-  console.log("==============================\n");
+function report(name: string, r: { succeeded: number; available: number; sold: number }) {
+  console.log(`\n[${name}] 下單成功=${r.succeeded}  實際訂單=${r.sold}  剩餘庫存=${r.available}  (總票=${STOCK})`);
+}
 
-  // 不變量:售出的票不該超過總庫存，剩餘庫存不該為負
-  expect(placedOrders.length).toBeLessThanOrEqual(zone.totalQuantity);
-  expect(zone.availableQuantity).toBeGreaterThanOrEqual(0);
+function expectNoOversell(r: { available: number; sold: number }) {
+  expect(r.sold).toBeLessThanOrEqual(STOCK); // 不超賣
+  expect(r.available).toBeGreaterThanOrEqual(0); // 庫存不為負
+  expect(r.available).toBe(STOCK - r.sold); // 計數器與實際訂單一致(無 lost update)
+}
+
+test("① 原子條件更新:不超賣", async () => {
+  const r = await hammer("/orders");
+  report("原子更新", r);
+  expectNoOversell(r);
+  expect(r.sold).toBe(STOCK); // 原子更新應剛好賣完
+});
+
+test("② 悲觀鎖 FOR UPDATE:不超賣", async () => {
+  const r = await hammer("/orders/lock");
+  report("悲觀鎖", r);
+  expectNoOversell(r);
+  expect(r.sold).toBe(STOCK); // 序列化後應剛好賣完
+});
+
+test("③ 樂觀鎖 version + 重試:不超賣", async () => {
+  const r = await hammer("/orders/optimistic");
+  report("樂觀鎖", r);
+  expectNoOversell(r); // 不超賣;高競爭下有可能賣不完(重試耗盡),故不斷言剛好 10
 });

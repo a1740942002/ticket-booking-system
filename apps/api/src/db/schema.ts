@@ -24,6 +24,7 @@ export const ticketZones = pgTable("ticket_zones", {
   price: numeric("price", { precision: 10, scale: 2 }).notNull(),
   totalQuantity: integer("total_quantity").notNull(),
   availableQuantity: integer("available_quantity").notNull(),
+  version: integer("version").notNull().default(0), // 樂觀鎖用（Phase 3）
 });
 
 export const orders = pgTable("orders", {
